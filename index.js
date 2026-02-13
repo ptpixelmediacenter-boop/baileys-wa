@@ -19,9 +19,14 @@ async function startSock() {
   const { state, saveCreds } = await useMultiFileAuthState("auth");
 
   sock = makeWASocket({
-    auth: state,
-    logger: P({ level: "silent" })
-  });
+  auth: state,
+  logger: P({ level: "silent" }),
+  browser: ["Ubuntu", "Chrome", "120.0.0"],
+  syncFullHistory: false,
+  connectTimeoutMs: 60000,
+  defaultQueryTimeoutMs: 60000,
+  keepAliveIntervalMs: 10000
+});
 
   sock.ev.on("creds.update", saveCreds);
 
