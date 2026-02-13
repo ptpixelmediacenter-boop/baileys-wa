@@ -1,5 +1,5 @@
 {
-  "name": "wa-lite",
+  "name": "wa-multi-tenant",
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
