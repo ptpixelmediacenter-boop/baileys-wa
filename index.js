@@ -85,38 +85,4 @@ async function startSock() {
 startSock();
 
 app.get("/", (req, res) => res.send("Baileys bot running"));
-app.listen(PORT, () => console.log("Running on", PORT));  });
-
-  sock.ev.on("messages.upsert", async ({ messages }) => {
-    const msg = messages[0];
-    if (!msg.message) return;
-
-    const jid = msg.key.remoteJid;
-    const text =
-      msg.message.conversation ||
-      msg.message.extendedTextMessage?.text ||
-      "";
-
-    if (!text) return;
-
-    let reply = "Pesan diterima kak.";
-
-    if (N8N_WEBHOOK) {
-      try {
-        const res = await axios.post(N8N_WEBHOOK, { jid, text });
-        if (res.data.reply) reply = res.data.reply;
-      } catch (e) {}
-    }
-
-    await sock.sendPresenceUpdate("composing", jid);
-    const delay = Math.floor(Math.random() * (60000 - 30000) + 30000);
-    await new Promise(r => setTimeout(r, delay));
-
-    await sock.sendMessage(jid, { text: reply });
-  });
-}
-
-startSock();
-
-app.get("/", (req, res) => res.send("Baileys bot running"));
 app.listen(PORT, () => console.log("Running on", PORT));
