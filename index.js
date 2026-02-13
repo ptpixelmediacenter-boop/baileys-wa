@@ -2,6 +2,7 @@ const express = require("express");
 const axios = require("axios");
 const P = require("pino");
 const QRCode = require("qrcode");
+const fs = require("fs");
 
 const {
   default: makeWASocket,
@@ -14,14 +15,25 @@ const app = express();
 app.use(express.json());
 app.set("trust proxy", 1);
 
-let sock;
-let latestQR = null;
+const sessions = {}; // simpan semua koneksi
+const qrStore = {};  // simpan QR tiap tenant
 
-async function start() {
-  const { state, saveCreds } = await useMultiFileAuthState("session");
+// ============================
+// START SESSION PER TENANT
+// ============================
+
+async function startSession(tenantId) {
+  if (sessions[tenantId]) return sessions[tenantId];
+
+  const sessionPath = `sessions/${tenantId}`;
+  if (!fs.existsSync(sessionPath)) {
+    fs.mkdirSync(sessionPath, { recursive: true });
+  }
+
+  const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
   const { version } = await fetchLatestBaileysVersion();
 
-  sock = makeWASocket({
+  const sock = makeWASocket({
     version,
     logger: P({ level: "silent" }),
     auth: state,
@@ -34,16 +46,18 @@ async function start() {
     const { qr, connection } = update;
 
     if (qr) {
-      latestQR = await QRCode.toDataURL(qr);
-      console.log("QR Updated");
+      qrStore[tenantId] = await QRCode.toDataURL(qr);
+      console.log(`QR updated for ${tenantId}`);
     }
 
     if (connection === "close") {
-      start();
+      console.log(`Reconnect ${tenantId}`);
+      delete sessions[tenantId];
+      startSession(tenantId);
     }
 
     if (connection === "open") {
-      console.log("WhatsApp Connected");
+      console.log(`Connected ${tenantId}`);
     }
   });
 
@@ -61,24 +75,49 @@ async function start() {
 
     if (process.env.N8N_WEBHOOK) {
       await axios.post(process.env.N8N_WEBHOOK, {
+        tenant: tenantId,
         sender,
         text
       });
     }
   });
+
+  sessions[tenantId] = sock;
+  return sock;
 }
 
-start();
+// ============================
+// CREATE TENANT
+// ============================
 
-app.get("/qr", (req, res) => {
-  if (!latestQR) return res.json({ status: "waiting" });
-  res.json({ qr: latestQR });
+app.post("/create-session", async (req, res) => {
+  const { tenant } = req.body;
+  if (!tenant) return res.status(400).json({ error: "tenant required" });
+
+  await startSession(tenant);
+  res.json({ status: "session created", tenant });
 });
 
-app.post("/send-text", async (req, res) => {
-  const { number, message } = req.body;
-  const jid = number + "@s.whatsapp.net";
+// ============================
+// GET QR PER TENANT
+// ============================
 
+app.get("/qr/:tenant", (req, res) => {
+  const { tenant } = req.params;
+  if (!qrStore[tenant]) return res.json({ status: "waiting" });
+  res.json({ qr: qrStore[tenant] });
+});
+
+// ============================
+// SEND TEXT
+// ============================
+
+app.post("/send-text", async (req, res) => {
+  const { tenant, number, message } = req.body;
+  const sock = sessions[tenant];
+  if (!sock) return res.status(404).json({ error: "tenant not found" });
+
+  const jid = number + "@s.whatsapp.net";
   const randomDelay = Math.floor(Math.random() * 20000) + 30000;
 
   await sock.presenceSubscribe(jid);
@@ -91,21 +130,18 @@ app.post("/send-text", async (req, res) => {
   res.json({ sent: true });
 });
 
-app.post("/send-media", async (req, res) => {
-  const { number, url, type } = req.body;
-  const jid = number + "@s.whatsapp.net";
+// ============================
+// SEND MEDIA
+// ============================
 
+app.post("/send-media", async (req, res) => {
+  const { tenant, number, url, type } = req.body;
+  const sock = sessions[tenant];
+  if (!sock) return res.status(404).json({ error: "tenant not found" });
+
+  const jid = number + "@s.whatsapp.net";
   let media = {};
 
   if (type === "image") media = { image: { url } };
   if (type === "video") media = { video: { url } };
-  if (type === "audio")
-    media = { audio: { url }, mimetype: "audio/mp4", ptt: true };
-
-  await sock.sendMessage(jid, media);
-
-  res.json({ sent: true });
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Server running"));
+  if (type ===
