@@ -1,93 +1,79 @@
-import makeWASocket, {
-  useMultiFileAuthState,
-  DisconnectReason
-} from "@whiskeysockets/baileys";
-import express from "express";
-import axios from "axios";
-import P from "pino";
-import qrcode from "qrcode-terminal";
+const makeWASocket = require("@whiskeysockets/baileys").default;
+const { useMultiFileAuthState, DisconnectReason } = require("@whiskeysockets/baileys");
+const P = require("pino");
+const axios = require("axios");
 
-const app = express();
-app.use(express.json());
+const WEBHOOK = process.env.N8N_WEBHOOK;
 
-const PORT = process.env.PORT || 3000;
-const N8N_WEBHOOK = process.env.N8N_WEBHOOK || "";
-
-let sock;
-
-async function startSock() {
-  const { state, saveCreds } = await useMultiFileAuthState("auth");
-
-  sock = makeWASocket({
-  auth: state,
-  logger: P({ level: "silent" }),
-  browser: ["Ubuntu", "Chrome", "120.0.0"],
-  syncFullHistory: false,
-  connectTimeoutMs: 60000,
-  defaultQueryTimeoutMs: 60000,
-  keepAliveIntervalMs: 10000
-});
-
-  sock.ev.on("creds.update", saveCreds);
-
-  sock.ev.on("connection.update", (update) => {
-    const { connection, lastDisconnect, qr } = update;
-
-    if (qr) {
-      console.log("=== SCAN QR DI BAWAH INI ===");
-      qrcode.generate(qr, { small: true });
-    }
-
-    if (connection === "open") {
-      console.log("WhatsApp connected!");
-    }
-
-    if (connection === "close") {
-      const shouldReconnect =
-        lastDisconnect?.error?.output?.statusCode !==
-        DisconnectReason.loggedOut;
-
-      if (shouldReconnect) {
-        console.log("Reconnecting...");
-        startSock();
-      } else {
-        console.log("Logged out.");
-      }
-    }
-  });
-
-  sock.ev.on("messages.upsert", async ({ messages }) => {
-    const msg = messages[0];
-    if (!msg.message) return;
-
-    const jid = msg.key.remoteJid;
-    const text =
-      msg.message.conversation ||
-      msg.message.extendedTextMessage?.text ||
-      "";
-
-    if (!text) return;
-
-    let reply = "Pesan diterima kak.";
-
-    if (N8N_WEBHOOK) {
-      try {
-        const res = await axios.post(N8N_WEBHOOK, { jid, text });
-        if (res.data.reply) reply = res.data.reply;
-      } catch (e) {
-        console.log("Webhook error:", e.message);
-      }
-    }
-
-    await sock.sendPresenceUpdate("composing", jid);
-    const delay = Math.floor(Math.random() * (60000 - 30000) + 30000);
-    await new Promise((r) => setTimeout(r, delay));
-
-    await sock.sendMessage(jid, { text: reply });
-  });
+if (!WEBHOOK) {
+    console.log("N8N_WEBHOOK not set!");
+    process.exit(1);
 }
 
-startSock();
+async function start() {
+    const { state, saveCreds } = await useMultiFileAuthState("auth");
 
-app.get("/", (req, res) => res.send("Baileys bot running"));
-app.listen(PORT, () => console.log("Running on", PORT));
+    const sock = makeWASocket({
+        logger: P({ level: "silent" }),
+        auth: state
+    });
+
+    sock.ev.on("creds.update", saveCreds);
+
+    sock.ev.on("connection.update", (update) => {
+        const { connection, lastDisconnect, qr } = update;
+
+        if (qr) {
+            console.log("Scan QR:");
+            console.log(qr);
+        }
+
+        if (connection === "close") {
+            const shouldReconnect =
+                lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+            if (shouldReconnect) start();
+        }
+
+        if (connection === "open") {
+            console.log("WhatsApp Connected ✅");
+        }
+    });
+
+    sock.ev.on("messages.upsert", async (m) => {
+        const msg = m.messages[0];
+        if (!msg.key.fromMe && msg.message?.conversation) {
+
+            const chatId = msg.key.remoteJid;
+            const text = msg.message.conversation;
+
+            // Mark as read
+            await sock.readMessages([msg.key]);
+
+            try {
+                // Kirim ke n8n
+                const res = await axios.post(WEBHOOK, {
+                    from: chatId,
+                    message: text
+                });
+
+                const reply = res.data.reply || "Baik, pesan diterima.";
+
+                // Typing status
+                await sock.sendPresenceUpdate("composing", chatId);
+
+                // Delay random 30-50 detik
+                const delay = Math.floor(Math.random() * (50000 - 30000 + 1)) + 30000;
+                await new Promise(resolve => setTimeout(resolve, delay));
+
+                await sock.sendPresenceUpdate("paused", chatId);
+
+                await sock.sendMessage(chatId, { text: reply });
+
+            } catch (err) {
+                console.log("Webhook error:", err.message);
+            }
+        }
+    });
+}
+
+start();
