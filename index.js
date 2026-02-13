@@ -1,147 +1,82 @@
 const express = require("express");
 const axios = require("axios");
-const P = require("pino");
-const QRCode = require("qrcode");
-const fs = require("fs");
-
-const {
-  default: makeWASocket,
-  useMultiFileAuthState,
-  fetchLatestBaileysVersion,
-  delay
-} = require("@whiskeysockets/baileys");
 
 const app = express();
 app.use(express.json());
-app.set("trust proxy", 1);
 
-const sessions = {}; // simpan semua koneksi
-const qrStore = {};  // simpan QR tiap tenant
+const COOLIFY_URL = process.env.COOLIFY_URL;
+const TOKEN = process.env.COOLIFY_TOKEN;
 
-// ============================
-// START SESSION PER TENANT
-// ============================
+const PROJECT_ID = process.env.PROJECT_ID;
+const ENV_ID = process.env.ENVIRONMENT_ID;
+const DEST_ID = process.env.DESTINATION_ID;
 
-async function startSession(tenantId) {
-  if (sessions[tenantId]) return sessions[tenantId];
+const GIT_REPO = process.env.GIT_REPO;
+const GIT_BRANCH = "main";
 
-  const sessionPath = `sessions/${tenantId}`;
-  if (!fs.existsSync(sessionPath)) {
-    fs.mkdirSync(sessionPath, { recursive: true });
-  }
+async function createApp(tenant) {
+  const domain = `${tenant}.wa.pixelbot.web.id`;
 
-  const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
-  const { version } = await fetchLatestBaileysVersion();
+  const response = await axios.post(
+    `${COOLIFY_URL}/api/v1/applications`,
+    {
+      name: `wa-${tenant}`,
+      project_uuid: PROJECT_ID,
+      environment_uuid: ENV_ID,
+      destination_uuid: DEST_ID,
 
-  const sock = makeWASocket({
-    version,
-    logger: P({ level: "silent" }),
-    auth: state,
-    printQRInTerminal: false
-  });
+      git_repository: GIT_REPO,
+      git_branch: GIT_BRANCH,
 
-  sock.ev.on("creds.update", saveCreds);
+      build_pack: "nixpacks",
+      ports_exposes: "3000",
 
-  sock.ev.on("connection.update", async (update) => {
-    const { qr, connection } = update;
+      domains: [domain],
 
-    if (qr) {
-      qrStore[tenantId] = await QRCode.toDataURL(qr);
-      console.log(`QR updated for ${tenantId}`);
+      environment_variables: [
+        { key: "PORT", value: "3000" },
+        { key: "TENANT_ID", value: tenant },
+        { key: "N8N_WEBHOOK", value: process.env.N8N_WEBHOOK }
+      ]
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        "Content-Type": "application/json"
+      }
     }
+  );
 
-    if (connection === "close") {
-      console.log(`Reconnect ${tenantId}`);
-      delete sessions[tenantId];
-      startSession(tenantId);
-    }
-
-    if (connection === "open") {
-      console.log(`Connected ${tenantId}`);
-    }
-  });
-
-  sock.ev.on("messages.upsert", async ({ messages }) => {
-    const msg = messages[0];
-    if (!msg.message) return;
-
-    const sender = msg.key.remoteJid;
-    const text =
-      msg.message.conversation ||
-      msg.message.extendedTextMessage?.text ||
-      "";
-
-    await sock.readMessages([msg.key]);
-
-    if (process.env.N8N_WEBHOOK) {
-      await axios.post(process.env.N8N_WEBHOOK, {
-        tenant: tenantId,
-        sender,
-        text
-      });
-    }
-  });
-
-  sessions[tenantId] = sock;
-  return sock;
+  return {
+    app: response.data,
+    domain,
+    qr_endpoint: `https://${domain}/qr/${tenant}`
+  };
 }
 
-// ============================
-// CREATE TENANT
-// ============================
+app.post("/create-tenant", async (req, res) => {
+  try {
+    const { tenant } = req.body;
+    if (!tenant)
+      return res.status(400).json({ error: "tenant required" });
 
-app.post("/create-session", async (req, res) => {
-  const { tenant } = req.body;
-  if (!tenant) return res.status(400).json({ error: "tenant required" });
+    const result = await createApp(tenant);
 
-  await startSession(tenant);
-  res.json({ status: "session created", tenant });
+    res.json({
+      success: true,
+      tenant,
+      app_name: `wa-${tenant}`,
+      domain: result.domain,
+      qr_endpoint: result.qr_endpoint,
+      message: "App created & deploying automatically"
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: err.response?.data || err.message
+    });
+  }
 });
 
-// ============================
-// GET QR PER TENANT
-// ============================
-
-app.get("/qr/:tenant", (req, res) => {
-  const { tenant } = req.params;
-  if (!qrStore[tenant]) return res.json({ status: "waiting" });
-  res.json({ qr: qrStore[tenant] });
-});
-
-// ============================
-// SEND TEXT
-// ============================
-
-app.post("/send-text", async (req, res) => {
-  const { tenant, number, message } = req.body;
-  const sock = sessions[tenant];
-  if (!sock) return res.status(404).json({ error: "tenant not found" });
-
-  const jid = number + "@s.whatsapp.net";
-  const randomDelay = Math.floor(Math.random() * 20000) + 30000;
-
-  await sock.presenceSubscribe(jid);
-  await sock.sendPresenceUpdate("composing", jid);
-  await delay(randomDelay);
-  await sock.sendPresenceUpdate("paused", jid);
-
-  await sock.sendMessage(jid, { text: message });
-
-  res.json({ sent: true });
-});
-
-// ============================
-// SEND MEDIA
-// ============================
-
-app.post("/send-media", async (req, res) => {
-  const { tenant, number, url, type } = req.body;
-  const sock = sessions[tenant];
-  if (!sock) return res.status(404).json({ error: "tenant not found" });
-
-  const jid = number + "@s.whatsapp.net";
-  let media = {};
-
-  if (type === "image") media = { image: { url } };
-  if (type === "video") media = { video: { url } };
-  if (type ===
+app.listen(4000, () =>
+  console.log("Auto Provisioner running")
+);
